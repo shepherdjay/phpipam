@@ -1,0 +1,178 @@
+---
+- hosts: development ansible_become=true
+  vars:
+    post_install: |
+      Provision of PHPIpam Base Complete
+      To access navigate to 127.0.0.1:8080
+      Admin username/password is admin/admin12345
+
+
+  tasks:
+  - name: Set yum ssl verify to false for corporate usage
+    lineinfile:
+      path: /etc/yum.conf
+      regexp: "^sslverify="
+      line: "sslverify=false"
+      state: present
+
+  - name: Set locale in /etc/environment
+    lineinfile:
+      path: /etc/environment
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+      state: present
+
+    with_items:
+      - { regexp: '^LC_ALL=', line: 'LC_ALL=en_US.utf-8' }
+      - { regexp: '^LANG=', line: 'LANG=en_US.utf-8' }
+
+  - name: Install Apache
+    yum:
+      name: httpd
+
+  - name: Install MySQL
+    yum:
+      name: mariadb-server
+
+  - name: Install PHP Packages
+    yum:
+      name: "{{ item }}"
+    with_items:
+      - php
+      - php-cli
+      - php-gd
+      - php-common
+      - php-ldap
+      - php-pdo
+      - php-pear
+      - php-snmp
+      - php-xml
+      - php-mysql
+      - php-mbstring
+
+  - name: Set PHP Timezone
+    lineinfile:
+      path: /etc/php.ini
+      regexp: '^date.timezone ='
+      line: 'date.timezone = UTC'
+      state: present
+
+  - name: Install git
+    yum:
+      name: git
+
+  - name: Copy repo over to /phpipam/
+    synchronize:
+      src: /vagrant/
+      dest: /phpipam/
+      delete: yes
+      recursive: yes
+
+  - name: Download git submodules for phpipam
+    command: chdir=/phpipam/ {{ item }}
+    with_items:
+      - git config --global http.sslVerify "false"
+      - git submodule update --init
+
+  - name: Modify document root in httpd.conf
+    lineinfile:
+      path: /etc/httpd/conf/httpd.conf
+      regexp: '^DocumentRoot'
+      line: 'DocumentRoot "/var/www/html/phpipam"'
+      state: present
+
+  - name: Add httpd config file for phpipam
+    copy:
+      src: /ansible/phpipam.conf
+      dest: /etc/httpd/conf.d/phpipam.conf
+      owner: root
+      group: root
+      mode: 0644
+
+  - name: Create symlink from to /var/www/html/phpipam to /phpipam/src
+    file:
+      src: /phpipam/src/
+      dest: /var/www/html/phpipam
+      state: link
+
+  - name: Modify owner on /phpipam/src
+    file:
+      path: /phpipam/src
+      owner: apache
+      group: apache
+      state: directory
+      recurse: yes
+
+  - name: Set files to 0644
+    command: find /phpipam/src -type f -exec chmod 0644 {} \;
+
+  - name: Set directories to 0755
+    command: find /phpipam/src -type d -exec chmod 0755 {} \;
+
+  - name: Setup config.php
+    copy:
+      src: /var/www/html/phpipam/config.dist.php
+      dest: /var/www/html/phpipam/config.php
+
+  - name: Install PIP and Python Development
+    yum:
+      name: "{{ item }}"
+      validate_certs: no
+    with_items:
+      - python-pip
+      - python-devel
+      - mysql-devel
+
+  - name: Install the Python MySQLB module
+    pip:
+      name: MySQL-python
+      extra_args: --trusted-host pypi.python.org
+
+  - name: Start httpd, mariadb and set for automatic start
+    service:
+      name: "{{ item }}"
+      state: restarted
+      enabled: yes
+    with_items:
+      - httpd
+      - mariadb
+
+  - name: Setup mariadb - Setup Root Account root:root and Remove Anonymous
+    mysql_user:
+      check_implicit_admin: yes
+      login_user: root
+      login_password: root
+      name: root
+      password: root
+      state: present
+
+  - name: Setup mariadb - Remove Anonymous User Account
+    mysql_user:
+      login_user: root
+      login_password: root
+      name: ''
+      state: absent
+
+  - name: Initialize phpIPAM DB Install
+    uri:
+      url: http://localhost:80/app/install/install-execute.php
+      method: POST
+      body: "mysqlrootuser=root&install_type=install&mysqlrootpass=root&createdb=on&creategrants=on"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded"
+        X-Requested-With: "XMLHttpRequest"
+      return_content: yes
+    register: database
+    failed_when:
+      - "'Database installed successfully!' not in database.content"
+      - "'Database already installed' not in database.content"
+
+  - name: Set phpIPAM admin password -> admin12345
+    uri:
+      url: http://localhost:80/app/install/postinstall_submit.php
+      method: POST
+      body: "password1=admin12345&password2=admin12345&siteTitle=phpipam&siteURL="
+
+  - name: Post Install Message
+    debug:
+      msg: "{{ post_install.split('\n') }}"
